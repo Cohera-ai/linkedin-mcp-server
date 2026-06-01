@@ -1,0 +1,76 @@
+# Build and push the LinkedIn MCP server image to the Cohera-ai org's
+# GitHub Container Registry. This is the image the Cohera backend's
+# sidecar service on Render pulls from.
+#
+# Triggers:
+#   - push to main          → publishes :latest and :main-<sha>
+#   - push of a v* tag      → also publishes :<tag>
+#   - workflow_dispatch     → one-off manual rebuild
+#
+# Auth: uses GITHUB_TOKEN automatically; no separate secret needed. The
+# token is org-scoped, so the destination repo's package permissions must
+# allow the workflow to write (Settings → Actions → General → Workflow
+# permissions → "Read and write").
+name: Publish to GHCR (Cohera)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: cohera-ai/linkedin-mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: tags
+        run: |
+          # Always publish :latest from main; add :main-<short-sha> for
+          # traceability so deploys can be rolled back to a specific build.
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAGS="${REGISTRY}/${IMAGE_NAME}:latest"
+          TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:main-${SHORT_SHA}"
+          # If this run was triggered by a v* tag push, also publish the
+          # bare version tag so production can pin to a specific release.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            TAGS="${TAGS},${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Render only runs on amd64. arm64 doubles the build time for no
+          # gain in production; add it back if local mac developers need
+          # native pulls.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
