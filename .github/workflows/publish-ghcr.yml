@@ -36,11 +36,14 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        # Prefer a repo-scoped GHCR_TOKEN if present (needed when the org
+        # blocks the default GITHUB_TOKEN from having packages:write); fall
+        # back to GITHUB_TOKEN when the org-level policy permits it.
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Derive image tags
         id: tags
