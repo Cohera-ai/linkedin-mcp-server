@@ -31,6 +31,13 @@ def _harden_linkedin_tree(path: Path) -> None:
     Complements :func:`secure_mkdir` by hardening pre-existing directories
     that may have been created with default umask permissions.  No-op on
     Windows or when *path* is not inside a ``.linkedin-mcp`` directory.
+
+    Best-effort: when running inside a container with a host-mounted
+    persistent volume, the mount root is often owned by ``root`` (not the
+    container user) and the chmod will fail with ``EPERM``. The actual
+    contents inside the tree are still owned by the running user, so this
+    is purely a defense-in-depth measure — skip silently rather than block
+    the entire browser start path on a hardening attempt we can't perform.
     """
     if os.name == "nt":
         return
@@ -40,7 +47,17 @@ def _harden_linkedin_tree(path: Path) -> None:
         return
     for p in (d, *d.parents):
         if p.is_dir() and stat.S_IMODE(p.stat().st_mode) != _PRIVATE_DIR_MODE:
-            p.chmod(_PRIVATE_DIR_MODE)
+            try:
+                p.chmod(_PRIVATE_DIR_MODE)
+            except PermissionError as exc:
+                # Container/cloud-mount edge case: directory exists, is
+                # readable, but owned by a different user (e.g. root on
+                # a Render/Fly/ECS persistent disk mount). Log and move on.
+                logger.debug(
+                    "Skipping chmod on %s (owner mismatch in mounted volume?): %s",
+                    p,
+                    exc,
+                )
         if p.name == ".linkedin-mcp":
             return
 
