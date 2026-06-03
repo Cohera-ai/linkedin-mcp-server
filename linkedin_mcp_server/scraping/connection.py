@@ -65,20 +65,11 @@ CONNECT_MENU_LABELS: dict[str, str] = {
 # confirm dialog that LinkedIn shows for some sender/recipient pairs in
 # place of the standard compose dialog after Connect is clicked. Same
 # AGENTS.md text escape-hatch rationale as the tables above: the confirm
-# dialog carries no locale-independent structural marker, so we match it
-# by its button labels.
-#
-# Each entry is ``(heading_substring, add_note_label, send_without_note_label)``:
-#
-# * ``add_note_label`` / ``send_without_note_label`` are the PRIMARY,
-#   stable identifiers. Each appears verbatim in BOTH the button's
-#   ``aria-label`` attribute and its visible ``.artdeco-button__text``
-#   span, so detection and clicks target ``button[aria-label="…"]``.
-# * ``heading_substring`` is the dialog's title/body text — informational
-#   only (kept for documentation and possible future heading matching);
-#   detection does not depend on it.
-#
-# Extend with additional locales once verified against a real dialog.
+# dialog carries no locale-independent structural marker distinguishing it
+# from the compose dialog (both are just ``[role="dialog"]``), so we match
+# its heading and button labels. Each entry is
+# ``(heading_substring, add_note_label, send_without_note_label)``; extend
+# with additional locales once verified against a real dialog.
 CHOICE_DIALOG_LABELS: dict[str, tuple[str, str, str]] = {
     "en": (
         "Add a note to your invitation",
