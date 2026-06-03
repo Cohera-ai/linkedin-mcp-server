@@ -774,10 +774,12 @@ class LinkedInExtractor:
         locator = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
         try:
             if await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
+                logger.debug("No dialog textarea found to fill")
                 return False
             await locator.fill(value, timeout=timeout)
             return True
         except Exception:
+            logger.debug("Dialog textarea fill failed", exc_info=True)
             return False
 
     async def _dismiss_dialog(self) -> None:
@@ -1774,6 +1776,26 @@ class LinkedInExtractor:
             return True
         return False
 
+    async def _click_modal_primary_action(self, *, timeout: int = 5000) -> bool:
+        """Click the modal's primary action button (e.g. "Send invitation").
+
+        Targets the button structurally by the artdeco primary-button class,
+        which is locale-independent (the secondary/cancel button is
+        ``--tertiary``/``--muted``). Playwright's click auto-waits for the
+        button to become enabled — LinkedIn keeps "Send invitation" disabled
+        until the note textarea has content. Returns True iff the click
+        landed.
+        """
+        selector = f"{_MODAL_ACTIONBAR_SELECTOR} button.artdeco-button--primary"
+        try:
+            if await self._page.locator(selector).count() == 0:
+                return False
+            await self._page.locator(selector).first.click(timeout=timeout)
+            return True
+        except Exception:
+            logger.debug("Modal primary-action click failed", exc_info=True)
+            return False
+
     async def _handle_invite_choice_dialog(
         self,
         note: str | None,
@@ -1809,30 +1831,52 @@ class LinkedInExtractor:
         )
 
         if note:
-            if await self._click_choice_add_note():
-                note_sent = await self._fill_dialog_textarea(note)
-                if note_sent and await self._click_dialog_primary_button():
-                    try:
-                        await self._page.wait_for_selector(
-                            _DIALOG_SELECTOR, state="hidden", timeout=5000
-                        )
-                    except PlaywrightTimeoutError:
-                        logger.debug("Compose dialog did not close after submit")
-                    return await self._finalize_choice_send(
-                        url, username, page_text, note_sent=True
-                    )
-                logger.info(
-                    "Compose flow after 'Add a note' did not complete; "
-                    "falling back to 'Send without a note' for %s",
+            # A note was requested: send WITH the note, or fail loudly. We
+            # never silently send a note-less invitation as a fallback — the
+            # caller asked for a note, so a failure to attach it is an error.
+            if not await self._click_choice_add_note():
+                logger.error(
+                    "Invite confirm dialog: 'Add a note' did not open the "
+                    "compose dialog for %s; not sending without the requested "
+                    "note",
                     username,
                 )
-            else:
-                logger.info(
-                    "'Add a note' did not open the compose dialog; "
-                    "falling back to 'Send without a note' for %s",
-                    username,
+                await self._dismiss_dialog()
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Could not open the note compose dialog to attach the "
+                    "requested note.",
+                    profile=page_text,
                 )
 
+            note_sent = await self._fill_dialog_textarea(note)
+            if not (note_sent and await self._click_modal_primary_action()):
+                logger.error(
+                    "Invite confirm dialog: could not complete sending the "
+                    "note for %s; not sending without the requested note",
+                    username,
+                )
+                await self._dismiss_dialog()
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Opened the note compose dialog but could not complete "
+                    "sending the invitation with the requested note.",
+                    profile=page_text,
+                )
+
+            try:
+                await self._page.wait_for_selector(
+                    _MODAL_ACTIONBAR_SELECTOR, state="hidden", timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Confirm dialog did not close after submit")
+            return await self._finalize_choice_send(
+                url, username, page_text, note_sent=True
+            )
+
+        # No note requested: send without a note.
         if await self._click_choice_send_without_note():
             return await self._finalize_choice_send(
                 url, username, page_text, note_sent=False
