@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
+import random
 import re
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
@@ -812,6 +813,61 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("More menu did not appear after click")
             return False
+
+    async def _close_more_menu(self, context: str) -> None:
+        """Close the open More menu via Escape so it can't intercept a
+        subsequent navigation, leaving the page in a clean state."""
+        try:
+            await self._page.keyboard.press("Escape")
+        except Exception:
+            logger.debug("Escape after %s failed", context, exc_info=True)
+
+    async def _click_more_menu_connect(self) -> bool:
+        """Click a Connect entry inside the open More menu (locale-gated).
+
+        Fallback for profiles where LinkedIn demotes Connect into the More
+        dropdown and renders it as a JS-triggered menu item carrying no
+        vanityName invite anchor — so the locale-independent deeplink
+        write-gate (``has_invite_anchor``) can never fire. The menu item
+        is matched by its visible label via
+        :data:`~linkedin_mcp_server.scraping.connection.CONNECT_MENU_LABELS`,
+        a documented text escape-hatch per AGENTS.md Scraping Rules
+        (mirroring the incoming-request Accept click); extend that table to
+        add locales. Returns True iff a Connect menu item was found and
+        clicked.
+        """
+        from linkedin_mcp_server.scraping.connection import CONNECT_MENU_LABELS
+
+        menu = self._page.locator("[role='menu']")
+        try:
+            if await menu.count() == 0:
+                return False
+        except Exception:
+            return False
+
+        for label in CONNECT_MENU_LABELS.values():
+            # Exact, whitespace-tolerant match on the item's text avoids
+            # false positives like "Connections" while tolerating nested
+            # icon/screen-reader markup inside the menu item.
+            item = menu.locator("button, [role='menuitem'], a").filter(
+                has_text=re.compile(rf"^\s*{re.escape(label)}\s*$")
+            )
+            try:
+                if await item.count() == 0:
+                    continue
+                target = item.first
+                try:
+                    await target.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    logger.debug("Scroll to menu Connect item failed", exc_info=True)
+                await target.click(timeout=5000)
+                return True
+            except Exception:
+                logger.debug(
+                    "Menu Connect click failed for label %r", label, exc_info=True
+                )
+                continue
+        return False
 
     async def _locator_is_visible(self, selector: str, *, timeout: int = 2000) -> bool:
         """Return whether the first matching locator is visible."""
@@ -1640,6 +1696,14 @@ class LinkedInExtractor:
         ``/preload/custom-invite/?vanityName=`` deeplink, which works
         whether the user-visible Connect button is in the action bar
         or buried under the More menu.
+
+        When the More menu holds a Connect entry that exposes no
+        vanityName anchor (thin/new accounts, privacy-restricted profiles,
+        and some A/B variants), the deeplink write-gate cannot fire; the
+        fallback then clicks that menu item directly (locale-gated label
+        match) and runs the same invite-dialog flow. ``connect_unavailable``
+        is returned only when Connect is found neither at the top level nor
+        inside the More dropdown.
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
@@ -1718,17 +1782,50 @@ class LinkedInExtractor:
         # has_invite_anchor=False guard is implicit: detect_connection_state
         # only returns "follow_only" after the has_invite_anchor branch
         # has already failed, so reaching this branch already implies it.)
+        connect_path = "top-level"
         if state == "follow_only":
             opened = await self._open_more_menu()
             if opened:
                 signals = await self._read_action_signals(username)
-                # Close the menu before any subsequent navigation so it
-                # doesn't intercept the upcoming page transition.
-                try:
-                    await self._page.keyboard.press("Escape")
-                except Exception:
-                    logger.debug("Escape after More-menu reread failed", exc_info=True)
                 logger.info("Post-More signals for %s: signals=%s", username, signals)
+                if signals.has_invite_anchor:
+                    # Connect surfaced in the menu as a vanityName invite
+                    # anchor: close the menu and fall through to the
+                    # locale-independent deeplink path below.
+                    connect_path = "More dropdown (invite anchor)"
+                    await self._close_more_menu("More-menu reread")
+                else:
+                    # The menu may still hold a Connect entry rendered as a
+                    # JS-triggered button/menuitem with no vanityName anchor
+                    # (thin/new accounts, privacy-restricted profiles, A/B
+                    # variants). The deeplink write-gate can't fire for those,
+                    # so click the item directly and run the standard invite
+                    # dialog flow. The short human-like delay also gives the
+                    # menu time to finish animating in before we click.
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+                    clicked = await self._click_more_menu_connect()
+                    if clicked:
+                        logger.info(
+                            "connect via More dropdown (menu click) for %s", username
+                        )
+                        submitted, note_sent = await self._submit_invite_dialog(note)
+                        if not submitted:
+                            return _connection_result(
+                                url,
+                                "connect_unavailable",
+                                "LinkedIn did not open a usable invite dialog "
+                                "for this profile.",
+                                profile=page_text,
+                            )
+                        return await self._finalize_connection_send(
+                            url,
+                            username,
+                            note_sent=note_sent,
+                            page_text=page_text,
+                        )
+                    # No Connect entry in the menu: close it so the page is
+                    # left clean for any retry before returning below.
+                    await self._close_more_menu("More-menu no-connect")
 
         # Write-gate: the deeplink fires only when we have a vanityName
         # invite anchor at this point. A `follow_only` outcome with no
@@ -1744,6 +1841,7 @@ class LinkedInExtractor:
                 profile=page_text,
             )
 
+        logger.info("connect via %s for %s", connect_path, username)
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
@@ -1758,6 +1856,28 @@ class LinkedInExtractor:
                 "LinkedIn did not open a usable invite dialog for this profile.",
                 profile=page_text,
             )
+
+        return await self._finalize_connection_send(
+            url, username, note_sent=note_sent, page_text=page_text
+        )
+
+    async def _finalize_connection_send(
+        self,
+        url: str,
+        username: str,
+        *,
+        note_sent: bool,
+        page_text: str,
+    ) -> dict[str, Any]:
+        """Re-read the profile after submitting an invite and classify the
+        outcome.
+
+        Shared by both the locale-independent deeplink path and the
+        More-dropdown menu-click fallback: if the vanityName invite anchor
+        is still present the send did not take (``send_failed``); otherwise
+        the request went out (``connected``).
+        """
+        from linkedin_mcp_server.scraping.connection import detect_connection_state
 
         verified = await self.scrape_person(username, {"main_profile"})
         verified_text = verified.get("sections", {}).get("main_profile", "")

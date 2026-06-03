@@ -47,6 +47,20 @@ INCOMING_REQUEST_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
+# Locale-gated labels for the More-dropdown Connect fallback. On some
+# profiles (thin/new accounts, privacy-restricted profiles, and A/B
+# variants) LinkedIn demotes Connect into the "More actions" menu and
+# renders it as a JS-triggered menu item that carries no vanityName
+# invite anchor — so the locale-independent deeplink write-gate cannot
+# fire and we must click the item by its visible label. Like
+# INCOMING_REQUEST_LABELS this is an AGENTS.md-sanctioned text escape
+# hatch: it is the only available signal for that menu item. Extend with
+# additional ("xx", "Label") entries once verified against a real menu.
+CONNECT_MENU_LABELS: dict[str, str] = {
+    "en": "Connect",
+}
+
+
 # Bound the text scan to the top-card region. The previous implementation
 # cut at the first occurrence of "About"/"Experience"/"Education" — but
 # those sentinel words are themselves locale-dependent, so a fixed

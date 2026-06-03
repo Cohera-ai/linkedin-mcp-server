@@ -1266,6 +1266,185 @@ class TestConnectWithPerson:
         mock_nav.assert_not_awaited()
         mock_submit.assert_not_awaited()
 
+    async def test_top_level_connect_does_not_open_more_menu(self, mock_page):
+        """Top-level Connect (vanityName anchor present up front) sends via the
+        deeplink directly and never touches the More dropdown."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals()],
+            ),
+            patch.object(
+                extractor, "_open_more_menu", new_callable=AsyncMock
+            ) as mock_open_more,
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_open_more.assert_not_awaited()
+
+    async def test_connect_via_more_menu_click_when_no_invite_anchor(self, mock_page):
+        """Connect demoted into the More dropdown as a JS menu item with no
+        vanityName invite anchor: the deeplink write-gate can never fire, so
+        the tool clicks the menu Connect entry and runs the invite dialog.
+
+        This is the More-dropdown click fallback path — distinct from the
+        deeplink path, which relies on the invite anchor surfacing after the
+        menu opens (test_connect_via_more_menu)."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Thin Account\n\n· 2nd\n\nNew here\n\nFollow\nMessage\nMore\n"
+        post = "Thin Account\n\n· 2nd\n\nNew here\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(pre, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                # 1st: follow_only. 2nd: post-More reread — invite anchor
+                # STILL absent (the menu item carries no vanityName anchor).
+                # 3rd: post-send verification — clean state.
+                side_effect=[
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(compose=True),
+                ],
+            ),
+            patch.object(
+                extractor, "_open_more_menu", new_callable=AsyncMock, return_value=True
+            ) as mock_open_more,
+            patch.object(
+                extractor,
+                "_click_more_menu_connect",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click_connect,
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(True, False),
+            ) as mock_submit,
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_open_more.assert_awaited_once()
+        mock_click_connect.assert_awaited_once()
+        mock_submit.assert_awaited_once()
+        # The deeplink path must NOT fire — connection went via the menu click.
+        mock_nav.assert_not_awaited()
+
+    async def test_more_menu_click_dialog_missing_returns_unavailable(self, mock_page):
+        """Menu Connect clicked but no invite dialog opened → connect_unavailable,
+        and the deeplink is not attempted as a second write."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Thin Account\n\n· 2nd\n\nNew here\n\nFollow\nMessage\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(compose=True, labeled_action=True),
+                ],
+            ),
+            patch.object(
+                extractor, "_open_more_menu", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_click_more_menu_connect",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False),
+            ),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        mock_nav.assert_not_awaited()
+
+    async def test_more_menu_no_connect_entry_returns_unavailable(self, mock_page):
+        """More menu opens but holds no Connect entry and no invite anchor:
+        the menu is closed (Escape) and connect_unavailable returned without
+        firing the deeplink or submitting a dialog."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(compose=True, labeled_action=True),
+                ],
+            ),
+            patch.object(
+                extractor, "_open_more_menu", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_click_more_menu_connect",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_click_connect,
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+            ) as mock_submit,
+            patch.object(
+                extractor, "_close_more_menu", new_callable=AsyncMock
+            ) as mock_close,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        mock_click_connect.assert_awaited_once()
+        mock_close.assert_awaited_once()
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
+
     async def test_returns_pending(self, mock_page):
         """Profile with a pending invitation: detected via labeled <a> in
         the action root. Returns status='pending' without firing the
@@ -1464,6 +1643,41 @@ class TestConnectWithPerson:
         # primary button (index 1) to send.
         assert clicks == [0, 1]
         textarea_locator.fill.assert_awaited_once()
+
+    async def test_click_more_menu_connect_clicks_matching_item(self, mock_page):
+        """_click_more_menu_connect locates a Connect entry inside the open
+        [role='menu'] and clicks it."""
+        extractor = LinkedInExtractor(mock_page)
+
+        target = MagicMock()
+        target.scroll_into_view_if_needed = AsyncMock()
+        target.click = AsyncMock()
+
+        item = MagicMock()
+        item.count = AsyncMock(return_value=1)
+        item.first = target
+
+        item_collection = MagicMock()
+        item_collection.filter = MagicMock(return_value=item)
+
+        menu = MagicMock()
+        menu.count = AsyncMock(return_value=1)
+        menu.locator = MagicMock(return_value=item_collection)
+
+        mock_page.locator = MagicMock(return_value=menu)
+
+        assert await extractor._click_more_menu_connect() is True
+        target.click.assert_awaited_once()
+
+    async def test_click_more_menu_connect_false_when_no_menu(self, mock_page):
+        """No open menu → helper returns False without clicking anything."""
+        extractor = LinkedInExtractor(mock_page)
+
+        menu = MagicMock()
+        menu.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=menu)
+
+        assert await extractor._click_more_menu_connect() is False
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
