@@ -96,6 +96,11 @@ _NETWORK_TOKENS = ("F", "S", "O")
 
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
+# LinkedIn's modal action button row. The "Add a note?" confirm dialog
+# renders its two buttons inside this container rather than a
+# ``[role="dialog"]`` ancestor, so confirm-dialog detection keys off this
+# class plus the buttons' aria-labels rather than the dialog role.
+_MODAL_ACTIONBAR_SELECTOR = ".artdeco-modal__actionbar"
 
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
@@ -1683,39 +1688,28 @@ class LinkedInExtractor:
         invitation?" two-button confirm dialog rather than the standard
         compose dialog.
 
-        LinkedIn shows this confirm dialog for some sender/recipient pairs
-        in place of the compose dialog. It carries no locale-independent
-        structural marker distinguishing it from the compose dialog, so —
-        per AGENTS.md Scraping Rules — detection is a locale-gated text
-        match (heading *or* both labeled buttons present) via
-        :data:`~linkedin_mcp_server.scraping.connection.CHOICE_DIALOG_LABELS`.
+        LinkedIn renders this confirm dialog's buttons inside a
+        ``.artdeco-modal__actionbar`` row — not a ``[role="dialog"]``
+        ancestor — so detection keys off that actionbar class plus the
+        distinctive "Send without a note" button located by its
+        ``aria-label`` (the unambiguous marker of the confirm dialog; the
+        compose dialog has an "Add a note" control but never a
+        "Send without a note" one). Labels are locale-gated via
+        :data:`~linkedin_mcp_server.scraping.connection.CHOICE_DIALOG_LABELS`
+        per AGENTS.md Scraping Rules.
         """
         from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
 
         try:
-            if await self._page.locator(_DIALOG_SELECTOR).count() == 0:
+            if await self._page.locator(_MODAL_ACTIONBAR_SELECTOR).count() == 0:
                 return False
         except Exception:
             return False
 
-        dialog = self._page.locator(_DIALOG_SELECTOR).first
-        for heading, add_label, send_label in CHOICE_DIALOG_LABELS.values():
+        for _heading, _add_label, send_label in CHOICE_DIALOG_LABELS.values():
             try:
-                heading_loc = dialog.locator("h1, h2, h3, [role='heading']").filter(
-                    has_text=re.compile(re.escape(heading))
-                )
-                if await heading_loc.count() > 0:
-                    return True
-            except Exception:
-                logger.debug("Choice-dialog heading probe failed", exc_info=True)
-            try:
-                add_btn = dialog.locator("button").filter(
-                    has_text=re.compile(rf"^\s*{re.escape(add_label)}\s*$")
-                )
-                send_btn = dialog.locator("button").filter(
-                    has_text=re.compile(rf"^\s*{re.escape(send_label)}\s*$")
-                )
-                if await add_btn.count() > 0 and await send_btn.count() > 0:
+                send_btn = self._page.locator(f'button[aria-label="{send_label}"]')
+                if await send_btn.count() > 0:
                     return True
             except Exception:
                 logger.debug("Choice-dialog button probe failed", exc_info=True)
@@ -1725,20 +1719,17 @@ class LinkedInExtractor:
         """Click "Add a note" in the confirm dialog and wait for the compose
         textarea to mount. Returns True iff the compose textarea appeared.
 
-        Locale-gated label match (AGENTS.md escape-hatch); scoped to the
-        open dialog so it cannot match unrelated buttons elsewhere.
+        Targets the button by its ``aria-label`` (stable; mirrors the
+        visible label) per locale via CHOICE_DIALOG_LABELS.
         """
         from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
 
-        dialog = self._page.locator(_DIALOG_SELECTOR).first
         for _heading, add_label, _send_label in CHOICE_DIALOG_LABELS.values():
-            btn = dialog.locator("button").filter(
-                has_text=re.compile(rf"^\s*{re.escape(add_label)}\s*$")
-            )
+            add_note_btn = self._page.locator(f'button[aria-label="{add_label}"]')
             try:
-                if await btn.count() == 0:
+                if await add_note_btn.count() == 0:
                     continue
-                await btn.first.click(timeout=5000)
+                await add_note_btn.first.click(timeout=5000)
             except Exception:
                 logger.debug(
                     "'Add a note' click failed for %r", add_label, exc_info=True
@@ -1758,26 +1749,25 @@ class LinkedInExtractor:
         """Click "Send without a note" in the confirm dialog, sending the
         invitation with no note. Returns True iff the button was clicked.
 
-        Locale-gated label match (AGENTS.md escape-hatch); scoped to the
-        open dialog.
+        Targets the button by its ``aria-label`` (stable; mirrors the
+        visible label) per locale via CHOICE_DIALOG_LABELS.
         """
         from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
 
-        dialog = self._page.locator(_DIALOG_SELECTOR).first
         for _heading, _add_label, send_label in CHOICE_DIALOG_LABELS.values():
-            btn = dialog.locator("button").filter(
-                has_text=re.compile(rf"^\s*{re.escape(send_label)}\s*$")
+            send_without_note_btn = self._page.locator(
+                f'button[aria-label="{send_label}"]'
             )
             try:
-                if await btn.count() == 0:
+                if await send_without_note_btn.count() == 0:
                     continue
-                await btn.first.click(timeout=5000)
+                await send_without_note_btn.first.click(timeout=5000)
             except Exception:
                 logger.debug("'Send without a note' click failed", exc_info=True)
                 continue
             try:
                 await self._page.wait_for_selector(
-                    _DIALOG_SELECTOR, state="hidden", timeout=5000
+                    _MODAL_ACTIONBAR_SELECTOR, state="hidden", timeout=5000
                 )
             except PlaywrightTimeoutError:
                 logger.debug("Confirm dialog did not close after 'Send without a note'")
