@@ -1856,33 +1856,62 @@ class TestConnectWithPerson:
 
         assert await extractor._click_more_menu_connect() is False
 
+    @staticmethod
+    def _choice_dialog_locator_router(*, actionbar: int, send_without_note: int):
+        """Route page.locator() by selector for _is_choice_dialog, mirroring
+        the real modal DOM:
+
+            <div class="artdeco-modal__actionbar">
+              <button aria-label="Add a note">…</button>
+              <button aria-label="Send without a note">…</button>
+            </div>
+        """
+
+        def router(selector: str):
+            loc = MagicMock()
+            if "artdeco-modal__actionbar" in selector:
+                loc.count = AsyncMock(return_value=actionbar)
+            elif 'aria-label="Send without a note"' in selector:
+                loc.count = AsyncMock(return_value=send_without_note)
+            else:
+                loc.count = AsyncMock(return_value=0)
+            return loc
+
+        return router
+
     async def test_is_choice_dialog_true_when_labels_present(self, mock_page):
-        """A dialog whose heading/buttons match CHOICE_DIALOG_LABELS is
-        recognized as the confirm dialog."""
+        """Actionbar present with a "Send without a note" aria-labeled button
+        is recognized as the confirm dialog."""
         extractor = LinkedInExtractor(mock_page)
-
-        matched = MagicMock()
-        matched.count = AsyncMock(return_value=1)
-        sub = MagicMock()
-        sub.filter = MagicMock(return_value=matched)
-
-        dialog = MagicMock()
-        dialog.locator = MagicMock(return_value=sub)
-
-        collection = MagicMock()
-        collection.count = AsyncMock(return_value=1)
-        collection.first = dialog
-        mock_page.locator = MagicMock(return_value=collection)
+        mock_page.locator = MagicMock(
+            side_effect=self._choice_dialog_locator_router(
+                actionbar=1, send_without_note=1
+            )
+        )
 
         assert await extractor._is_choice_dialog() is True
 
     async def test_is_choice_dialog_false_when_no_dialog(self, mock_page):
-        """No open dialog → not the confirm dialog."""
+        """No modal actionbar → not the confirm dialog."""
         extractor = LinkedInExtractor(mock_page)
+        mock_page.locator = MagicMock(
+            side_effect=self._choice_dialog_locator_router(
+                actionbar=0, send_without_note=0
+            )
+        )
 
-        collection = MagicMock()
-        collection.count = AsyncMock(return_value=0)
-        mock_page.locator = MagicMock(return_value=collection)
+        assert await extractor._is_choice_dialog() is False
+
+    async def test_is_choice_dialog_false_when_no_send_without_note(self, mock_page):
+        """An actionbar with no "Send without a note" button (e.g. the
+        standard compose dialog) is NOT misclassified as the confirm
+        dialog."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.locator = MagicMock(
+            side_effect=self._choice_dialog_locator_router(
+                actionbar=1, send_without_note=0
+            )
+        )
 
         assert await extractor._is_choice_dialog() is False
 
