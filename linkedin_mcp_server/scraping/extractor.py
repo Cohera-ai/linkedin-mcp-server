@@ -1678,6 +1678,254 @@ class LinkedInExtractor:
 
         return True, note_sent
 
+    async def _is_choice_dialog(self) -> bool:
+        """Return True if the open dialog is the "Add a note to your
+        invitation?" two-button confirm dialog rather than the standard
+        compose dialog.
+
+        LinkedIn shows this confirm dialog for some sender/recipient pairs
+        in place of the compose dialog. It carries no locale-independent
+        structural marker distinguishing it from the compose dialog, so —
+        per AGENTS.md Scraping Rules — detection is a locale-gated text
+        match (heading *or* both labeled buttons present) via
+        :data:`~linkedin_mcp_server.scraping.connection.CHOICE_DIALOG_LABELS`.
+        """
+        from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
+
+        try:
+            if await self._page.locator(_DIALOG_SELECTOR).count() == 0:
+                return False
+        except Exception:
+            return False
+
+        dialog = self._page.locator(_DIALOG_SELECTOR).first
+        for heading, add_label, send_label in CHOICE_DIALOG_LABELS.values():
+            try:
+                heading_loc = dialog.locator("h1, h2, h3, [role='heading']").filter(
+                    has_text=re.compile(re.escape(heading))
+                )
+                if await heading_loc.count() > 0:
+                    return True
+            except Exception:
+                logger.debug("Choice-dialog heading probe failed", exc_info=True)
+            try:
+                add_btn = dialog.locator("button").filter(
+                    has_text=re.compile(rf"^\s*{re.escape(add_label)}\s*$")
+                )
+                send_btn = dialog.locator("button").filter(
+                    has_text=re.compile(rf"^\s*{re.escape(send_label)}\s*$")
+                )
+                if await add_btn.count() > 0 and await send_btn.count() > 0:
+                    return True
+            except Exception:
+                logger.debug("Choice-dialog button probe failed", exc_info=True)
+        return False
+
+    async def _click_choice_add_note(self) -> bool:
+        """Click "Add a note" in the confirm dialog and wait for the compose
+        textarea to mount. Returns True iff the compose textarea appeared.
+
+        Locale-gated label match (AGENTS.md escape-hatch); scoped to the
+        open dialog so it cannot match unrelated buttons elsewhere.
+        """
+        from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
+
+        dialog = self._page.locator(_DIALOG_SELECTOR).first
+        for _heading, add_label, _send_label in CHOICE_DIALOG_LABELS.values():
+            btn = dialog.locator("button").filter(
+                has_text=re.compile(rf"^\s*{re.escape(add_label)}\s*$")
+            )
+            try:
+                if await btn.count() == 0:
+                    continue
+                await btn.first.click(timeout=5000)
+            except Exception:
+                logger.debug(
+                    "'Add a note' click failed for %r", add_label, exc_info=True
+                )
+                continue
+            try:
+                await self._page.wait_for_selector(
+                    _DIALOG_TEXTAREA_SELECTOR, state="visible", timeout=3000
+                )
+                return True
+            except PlaywrightTimeoutError:
+                logger.debug("Compose textarea did not appear after 'Add a note'")
+                return False
+        return False
+
+    async def _click_choice_send_without_note(self) -> bool:
+        """Click "Send without a note" in the confirm dialog, sending the
+        invitation with no note. Returns True iff the button was clicked.
+
+        Locale-gated label match (AGENTS.md escape-hatch); scoped to the
+        open dialog.
+        """
+        from linkedin_mcp_server.scraping.connection import CHOICE_DIALOG_LABELS
+
+        dialog = self._page.locator(_DIALOG_SELECTOR).first
+        for _heading, _add_label, send_label in CHOICE_DIALOG_LABELS.values():
+            btn = dialog.locator("button").filter(
+                has_text=re.compile(rf"^\s*{re.escape(send_label)}\s*$")
+            )
+            try:
+                if await btn.count() == 0:
+                    continue
+                await btn.first.click(timeout=5000)
+            except Exception:
+                logger.debug("'Send without a note' click failed", exc_info=True)
+                continue
+            try:
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="hidden", timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Confirm dialog did not close after 'Send without a note'")
+            return True
+        return False
+
+    async def _handle_invite_choice_dialog(
+        self,
+        note: str | None,
+        url: str,
+        username: str,
+        page_text: str,
+    ) -> dict[str, Any] | None:
+        """Drive the "Add a note to your invitation?" two-button confirm
+        dialog when it appears in place of the compose dialog.
+
+        Returns a connection-result dict when this dialog is handled, or
+        ``None`` when the open dialog is the standard compose dialog (the
+        caller then proceeds with the existing compose flow).
+
+        Status semantics: a successful send via either button returns
+        ``pending`` (the invite is out and now awaiting acceptance).
+        ``connect_unavailable`` is returned only when neither button can be
+        actioned or the send cannot be confirmed.
+
+        When a ``note`` is provided we click "Add a note" first to open the
+        compose dialog (the two-button prompt is a UX intermediate step, not
+        a hard no-notes block). If that route fails to surface the compose
+        dialog, we fall back to "Send without a note" — the invitation
+        still goes out and the note is delivered at the application layer.
+        """
+        if not await self._is_choice_dialog():
+            return None
+
+        logger.info(
+            "Invite confirm dialog detected for %s (note=%s)",
+            username,
+            note is not None,
+        )
+
+        if note:
+            if await self._click_choice_add_note():
+                note_sent = await self._fill_dialog_textarea(note)
+                if note_sent and await self._click_dialog_primary_button():
+                    try:
+                        await self._page.wait_for_selector(
+                            _DIALOG_SELECTOR, state="hidden", timeout=5000
+                        )
+                    except PlaywrightTimeoutError:
+                        logger.debug("Compose dialog did not close after submit")
+                    return await self._finalize_choice_send(
+                        url, username, page_text, note_sent=True
+                    )
+                logger.info(
+                    "Compose flow after 'Add a note' did not complete; "
+                    "falling back to 'Send without a note' for %s",
+                    username,
+                )
+            else:
+                logger.info(
+                    "'Add a note' did not open the compose dialog; "
+                    "falling back to 'Send without a note' for %s",
+                    username,
+                )
+
+        if await self._click_choice_send_without_note():
+            return await self._finalize_choice_send(
+                url, username, page_text, note_sent=False
+            )
+
+        await self._dismiss_dialog()
+        return _connection_result(
+            url,
+            "connect_unavailable",
+            "LinkedIn did not expose a usable button on the invitation confirm dialog.",
+            profile=page_text,
+        )
+
+    async def _send_invite_via_dialog(
+        self,
+        note: str | None,
+        url: str,
+        username: str,
+        page_text: str,
+    ) -> dict[str, Any]:
+        """Drive whichever invite dialog opened after a Connect click: the
+        standard compose dialog or the "Add a note to your invitation?"
+        two-button confirm dialog. Returns the full connection result.
+        """
+        choice = await self._handle_invite_choice_dialog(note, url, username, page_text)
+        if choice is not None:
+            return choice
+
+        submitted, note_sent = await self._submit_invite_dialog(note)
+        if not submitted:
+            return _connection_result(
+                url,
+                "connect_unavailable",
+                "LinkedIn did not open a usable invite dialog for this profile.",
+                profile=page_text,
+            )
+        return await self._finalize_connection_send(
+            url, username, note_sent=note_sent, page_text=page_text
+        )
+
+    async def _finalize_choice_send(
+        self,
+        url: str,
+        username: str,
+        page_text: str,
+        *,
+        note_sent: bool,
+    ) -> dict[str, Any]:
+        """Confirm an invite sent via the confirm dialog and return
+        ``pending``.
+
+        Mirrors :meth:`_finalize_connection_send`'s verification re-read but
+        reports ``pending`` on success (the invite is out and awaiting
+        acceptance) and ``connect_unavailable`` when the vanityName invite
+        anchor still shows (the send did not take).
+        """
+        verified = await self.scrape_person(username, {"main_profile"})
+        verified_text = verified.get("sections", {}).get("main_profile", "")
+        verified_signals = await self._read_action_signals(username)
+
+        if verified_signals.has_invite_anchor:
+            return _connection_result(
+                url,
+                "connect_unavailable",
+                "Submitted the invitation confirm dialog but the profile "
+                "still exposes Connect.",
+                note_sent=note_sent,
+                profile=verified_text or page_text,
+            )
+
+        message = (
+            "Connection request sent with a note; invitation is now pending."
+            if note_sent
+            else "Connection request sent without a note; invitation is now pending."
+        )
+        return _connection_result(
+            url,
+            "pending",
+            message,
+            note_sent=note_sent,
+            profile=verified_text or page_text,
+        )
+
     async def connect_with_person(
         self,
         username: str,
@@ -1704,6 +1952,13 @@ class LinkedInExtractor:
         match) and runs the same invite-dialog flow. ``connect_unavailable``
         is returned only when Connect is found neither at the top level nor
         inside the More dropdown.
+
+        After Connect is clicked, LinkedIn may present an "Add a note to
+        your invitation?" two-button confirm dialog instead of the compose
+        dialog. With a ``note`` we click "Add a note" to open the compose
+        dialog and send the note; otherwise (or if that route fails) we
+        click "Send without a note". Either send returns ``pending`` — the
+        invitation is out and now awaiting acceptance.
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
@@ -1808,20 +2063,8 @@ class LinkedInExtractor:
                         logger.info(
                             "connect via More dropdown (menu click) for %s", username
                         )
-                        submitted, note_sent = await self._submit_invite_dialog(note)
-                        if not submitted:
-                            return _connection_result(
-                                url,
-                                "connect_unavailable",
-                                "LinkedIn did not open a usable invite dialog "
-                                "for this profile.",
-                                profile=page_text,
-                            )
-                        return await self._finalize_connection_send(
-                            url,
-                            username,
-                            note_sent=note_sent,
-                            page_text=page_text,
+                        return await self._send_invite_via_dialog(
+                            note, url, username, page_text
                         )
                     # No Connect entry in the menu: close it so the page is
                     # left clean for any retry before returning below.
@@ -1848,18 +2091,7 @@ class LinkedInExtractor:
         )
         await self._navigate_to_page(invite_url)
 
-        submitted, note_sent = await self._submit_invite_dialog(note)
-        if not submitted:
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not open a usable invite dialog for this profile.",
-                profile=page_text,
-            )
-
-        return await self._finalize_connection_send(
-            url, username, note_sent=note_sent, page_text=page_text
-        )
+        return await self._send_invite_via_dialog(note, url, username, page_text)
 
     async def _finalize_connection_send(
         self,

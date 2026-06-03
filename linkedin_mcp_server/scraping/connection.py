@@ -61,6 +61,24 @@ CONNECT_MENU_LABELS: dict[str, str] = {
 }
 
 
+# Locale-gated labels for the "Add a note to your invitation?" two-button
+# confirm dialog that LinkedIn shows for some sender/recipient pairs in
+# place of the standard compose dialog after Connect is clicked. Same
+# AGENTS.md text escape-hatch rationale as the tables above: the confirm
+# dialog carries no locale-independent structural marker distinguishing it
+# from the compose dialog (both are just ``[role="dialog"]``), so we match
+# its heading and button labels. Each entry is
+# ``(heading_substring, add_note_label, send_without_note_label)``; extend
+# with additional locales once verified against a real dialog.
+CHOICE_DIALOG_LABELS: dict[str, tuple[str, str, str]] = {
+    "en": (
+        "Add a note to your invitation",
+        "Add a note",
+        "Send without a note",
+    ),
+}
+
+
 # Bound the text scan to the top-card region. The previous implementation
 # cut at the first occurrence of "About"/"Experience"/"Education" — but
 # those sentinel words are themselves locale-dependent, so a fixed
