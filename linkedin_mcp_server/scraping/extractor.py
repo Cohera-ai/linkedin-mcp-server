@@ -1796,6 +1796,84 @@ class LinkedInExtractor:
             logger.debug("Modal primary-action click failed", exc_info=True)
             return False
 
+    async def _enter_and_send_note(self, note: str) -> bool:
+        """Type the note into the compose textarea and click Send.
+
+        Enters the note via real keystrokes (``press_sequentially``) rather
+        than ``Locator.fill``: LinkedIn keeps the "Send invitation" button
+        disabled until its editor registers input, and a single synthetic
+        fill event does not trigger that on every variant — which leaves
+        Send disabled and the click timing out. Then waits for the primary
+        Send button to actually become enabled before clicking. On failure
+        (Send never enables, or the click cannot land) logs a precise reason
+        — disabled button vs. an inline verification challenge — and returns
+        False.
+        """
+        if await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
+            logger.debug("No note textarea found to type into")
+            return False
+
+        textarea = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
+        try:
+            await textarea.click(timeout=5000)
+            await textarea.fill("", timeout=5000)
+            await textarea.press_sequentially(note, delay=20, timeout=20000)
+        except Exception:
+            logger.debug(
+                "Typing the note into the compose textarea failed", exc_info=True
+            )
+            return False
+
+        # Wait for LinkedIn to enable Send now that the note has content.
+        enabled_send = (
+            f"{_MODAL_ACTIONBAR_SELECTOR} "
+            "button.artdeco-button--primary:not([disabled])"
+        )
+        try:
+            await self._page.locator(enabled_send).first.wait_for(
+                state="visible", timeout=5000
+            )
+        except Exception:
+            await self._log_invite_blocked_reason("Send did not enable after note")
+            return False
+
+        if not await self._click_modal_primary_action():
+            await self._log_invite_blocked_reason("Send click did not land")
+            return False
+        return True
+
+    async def _log_invite_blocked_reason(self, context: str) -> None:
+        """Log why the invite Send could not be actioned — a disabled button
+        vs. an inline verification (reCAPTCHA) challenge — to aid diagnosis.
+
+        Emitted at WARNING so it surfaces without DEBUG logging.
+        """
+        try:
+            info = await self._page.evaluate(
+                r"""() => {
+                  const vis = el => !!(
+                    el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                  );
+                  const send = document.querySelector(
+                    '.artdeco-modal__actionbar button.artdeco-button--primary'
+                  );
+                  const recap = document.querySelector(
+                    'iframe[src*="recaptcha"], iframe[title*="recaptcha" i], '
+                    + '.g-recaptcha, [id^="g-recaptcha"]'
+                  );
+                  return {
+                    sendPresent: !!send,
+                    sendDisabled: send ? send.disabled : null,
+                    sendVisible: send ? vis(send) : null,
+                    recaptchaPresent: !!recap,
+                    recaptchaVisible: recap ? vis(recap) : false,
+                  };
+                }"""
+            )
+            logger.warning("Invite send blocked (%s): %s", context, info)
+        except Exception:
+            logger.debug("Could not probe invite-send blocked reason", exc_info=True)
+
     async def _handle_invite_choice_dialog(
         self,
         note: str | None,
@@ -1815,11 +1893,10 @@ class LinkedInExtractor:
         ``connect_unavailable`` is returned only when neither button can be
         actioned or the send cannot be confirmed.
 
-        When a ``note`` is provided we click "Add a note" first to open the
-        compose dialog (the two-button prompt is a UX intermediate step, not
-        a hard no-notes block). If that route fails to surface the compose
-        dialog, we fall back to "Send without a note" — the invitation
-        still goes out and the note is delivered at the application layer.
+        When a ``note`` is provided we click "Add a note" to open the
+        compose dialog and send WITH the note, or fail loudly — we never
+        silently send a note-less invitation. When no note is provided we
+        click "Send without a note".
         """
         if not await self._is_choice_dialog():
             return None
@@ -1850,8 +1927,7 @@ class LinkedInExtractor:
                     profile=page_text,
                 )
 
-            note_sent = await self._fill_dialog_textarea(note)
-            if not (note_sent and await self._click_modal_primary_action()):
+            if not await self._enter_and_send_note(note):
                 logger.error(
                     "Invite confirm dialog: could not complete sending the "
                     "note for %s; not sending without the requested note",

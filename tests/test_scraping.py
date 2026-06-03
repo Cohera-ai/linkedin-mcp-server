@@ -1478,16 +1478,10 @@ class TestConnectWithPerson:
             ) as mock_add_note,
             patch.object(
                 extractor,
-                "_fill_dialog_textarea",
+                "_enter_and_send_note",
                 new_callable=AsyncMock,
                 return_value=True,
-            ),
-            patch.object(
-                extractor,
-                "_click_modal_primary_action",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
+            ) as mock_enter_send,
             patch.object(
                 extractor, "_click_choice_send_without_note", new_callable=AsyncMock
             ) as mock_send_without,
@@ -1497,6 +1491,7 @@ class TestConnectWithPerson:
         assert result["status"] == "pending"
         assert result["note_sent"] is True
         mock_add_note.assert_awaited_once()
+        mock_enter_send.assert_awaited_once()
         # The note route succeeded, so the no-note button is never clicked.
         mock_send_without.assert_not_awaited()
 
@@ -1618,16 +1613,10 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
-                "_fill_dialog_textarea",
+                "_enter_and_send_note",
                 new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor,
-                "_click_modal_primary_action",
-                new_callable=AsyncMock,
-                return_value=False,  # Send couldn't complete
-            ) as mock_primary,
+                return_value=False,  # note entry/Send couldn't complete
+            ) as mock_enter_send,
             patch.object(
                 extractor,
                 "_click_choice_send_without_note",
@@ -1639,7 +1628,7 @@ class TestConnectWithPerson:
 
         assert result["status"] == "send_failed"
         assert result["note_sent"] is False
-        mock_primary.assert_awaited_once()
+        mock_enter_send.assert_awaited_once()
         # A note was requested → never silently send without it.
         mock_send_without.assert_not_awaited()
 
@@ -1998,6 +1987,89 @@ class TestConnectWithPerson:
         mock_page.locator = MagicMock(return_value=loc)
 
         assert await extractor._click_modal_primary_action() is False
+
+    async def test_enter_and_send_note_types_waits_and_clicks(self, mock_page):
+        """Happy path: types the note via keystrokes, waits for Send to
+        enable, then clicks the primary action."""
+        extractor = LinkedInExtractor(mock_page)
+
+        textarea = MagicMock()
+        textarea.click = AsyncMock()
+        textarea.fill = AsyncMock()
+        textarea.press_sequentially = AsyncMock()
+
+        enabled_first = MagicMock()
+        enabled_first.wait_for = AsyncMock()
+
+        def router(selector: str):
+            loc = MagicMock()
+            if "textarea" in selector:
+                loc.count = AsyncMock(return_value=1)
+                loc.first = textarea
+            else:  # enabled Send selector
+                loc.first = enabled_first
+            return loc
+
+        mock_page.locator = MagicMock(side_effect=router)
+
+        with patch.object(
+            extractor,
+            "_click_modal_primary_action",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_primary:
+            assert await extractor._enter_and_send_note("hello") is True
+
+        # Note entered via real keystrokes, not a synthetic fill.
+        textarea.press_sequentially.assert_awaited_once()
+        enabled_first.wait_for.assert_awaited_once()
+        mock_primary.assert_awaited_once()
+
+    async def test_enter_and_send_note_false_when_no_textarea(self, mock_page):
+        """No compose textarea → returns False without typing."""
+        extractor = LinkedInExtractor(mock_page)
+
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=loc)
+
+        assert await extractor._enter_and_send_note("hello") is False
+
+    async def test_enter_and_send_note_false_when_send_never_enables(self, mock_page):
+        """Note typed but Send never enables (e.g. a verification challenge):
+        returns False and does not click the primary action."""
+        extractor = LinkedInExtractor(mock_page)
+
+        textarea = MagicMock()
+        textarea.click = AsyncMock()
+        textarea.fill = AsyncMock()
+        textarea.press_sequentially = AsyncMock()
+
+        enabled_first = MagicMock()
+        enabled_first.wait_for = AsyncMock(
+            side_effect=Exception("send stayed disabled")
+        )
+
+        def router(selector: str):
+            loc = MagicMock()
+            if "textarea" in selector:
+                loc.count = AsyncMock(return_value=1)
+                loc.first = textarea
+            else:
+                loc.first = enabled_first
+            return loc
+
+        mock_page.locator = MagicMock(side_effect=router)
+        mock_page.evaluate = AsyncMock(
+            return_value={"sendDisabled": True, "recaptchaVisible": True}
+        )
+
+        with patch.object(
+            extractor, "_click_modal_primary_action", new_callable=AsyncMock
+        ) as mock_primary:
+            assert await extractor._enter_and_send_note("hello") is False
+
+        mock_primary.assert_not_awaited()
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
