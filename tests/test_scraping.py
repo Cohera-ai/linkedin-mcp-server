@@ -1484,7 +1484,7 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
-                "_click_dialog_primary_button",
+                "_click_modal_primary_action",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -1586,6 +1586,71 @@ class TestConnectWithPerson:
         assert result["note_sent"] is False
         # Tried the note route first, then fell back to send-without-note.
         mock_add_note.assert_awaited_once()
+        mock_send_without.assert_awaited_once()
+
+    async def test_choice_dialog_compose_submit_fails_recovers_via_cancel(
+        self, mock_page
+    ):
+        """Confirm dialog, note requested: 'Add a note' opens compose and the
+        note fills, but the primary Send click can't complete. The handler
+        cancels back to the choice dialog and sends without a note so the
+        invitation still goes out (status=pending, note_sent=False)."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals(compose=True)],
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_is_choice_dialog",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_choice_add_note",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_fill_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_modal_primary_action",
+                new_callable=AsyncMock,
+                return_value=False,  # Send couldn't complete
+            ) as mock_primary,
+            patch.object(
+                extractor, "_cancel_add_note", new_callable=AsyncMock, return_value=True
+            ) as mock_cancel,
+            patch.object(
+                extractor,
+                "_click_choice_send_without_note",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send_without,
+        ):
+            result = await extractor.connect_with_person("testuser", note="Hi there")
+
+        assert result["status"] == "pending"
+        assert result["note_sent"] is False
+        mock_primary.assert_awaited_once()
+        # Recovery: cancel back to the choice dialog, then send without a note.
+        mock_cancel.assert_awaited_once()
         mock_send_without.assert_awaited_once()
 
     async def test_choice_dialog_neither_button_returns_unavailable(self, mock_page):
@@ -1914,6 +1979,51 @@ class TestConnectWithPerson:
         )
 
         assert await extractor._is_choice_dialog() is False
+
+    async def test_click_modal_primary_action_clicks_primary_button(self, mock_page):
+        """The primary action is clicked via the artdeco primary-button class
+        (locale-independent), and the click auto-waits for enabled."""
+        extractor = LinkedInExtractor(mock_page)
+
+        target = MagicMock()
+        target.click = AsyncMock()
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=1)
+        loc.first = target
+        mock_page.locator = MagicMock(return_value=loc)
+
+        assert await extractor._click_modal_primary_action() is True
+        target.click.assert_awaited_once()
+        # Targets the primary button inside the modal actionbar structurally.
+        selector = mock_page.locator.call_args.args[0]
+        assert "artdeco-modal__actionbar" in selector
+        assert "artdeco-button--primary" in selector
+
+    async def test_click_modal_primary_action_false_when_absent(self, mock_page):
+        """No primary action button → returns False without clicking."""
+        extractor = LinkedInExtractor(mock_page)
+
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=loc)
+
+        assert await extractor._click_modal_primary_action() is False
+
+    async def test_cancel_add_note_clicks_by_aria_label(self, mock_page):
+        """'Cancel adding a note' is clicked by its aria-label."""
+        extractor = LinkedInExtractor(mock_page)
+
+        target = MagicMock()
+        target.click = AsyncMock()
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=1)
+        loc.first = target
+        mock_page.locator = MagicMock(return_value=loc)
+
+        assert await extractor._cancel_add_note() is True
+        target.click.assert_awaited_once()
+        selector = mock_page.locator.call_args.args[0]
+        assert 'aria-label="Cancel adding a note"' in selector
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
