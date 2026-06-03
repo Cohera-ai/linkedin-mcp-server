@@ -1445,6 +1445,183 @@ class TestConnectWithPerson:
         mock_nav.assert_not_awaited()
         mock_submit.assert_not_awaited()
 
+    async def test_choice_dialog_with_note_clicks_add_note(self, mock_page):
+        """'Add a note to your invitation?' confirm dialog appears with a note
+        requested: 'Add a note' opens the compose dialog, the note is sent,
+        status=pending, note_sent=True."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals(compose=True)],
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_is_choice_dialog",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_choice_add_note",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_add_note,
+            patch.object(
+                extractor,
+                "_fill_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_click_choice_send_without_note", new_callable=AsyncMock
+            ) as mock_send_without,
+        ):
+            result = await extractor.connect_with_person("testuser", note="Hi there")
+
+        assert result["status"] == "pending"
+        assert result["note_sent"] is True
+        mock_add_note.assert_awaited_once()
+        # The note route succeeded, so the no-note button is never clicked.
+        mock_send_without.assert_not_awaited()
+
+    async def test_choice_dialog_no_note_sends_without_note(self, mock_page):
+        """Confirm dialog appears with no note requested: 'Send without a note'
+        fires, status=pending, note_sent=False."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals(compose=True)],
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_is_choice_dialog",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_click_choice_add_note", new_callable=AsyncMock
+            ) as mock_add_note,
+            patch.object(
+                extractor,
+                "_click_choice_send_without_note",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send_without,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "pending"
+        assert result["note_sent"] is False
+        mock_send_without.assert_awaited_once()
+        # No note requested: the "Add a note" route is never attempted.
+        mock_add_note.assert_not_awaited()
+
+    async def test_choice_dialog_add_note_fails_falls_back(self, mock_page):
+        """Confirm dialog appears, note requested, but 'Add a note' does not
+        surface a compose dialog: fall back to 'Send without a note',
+        status=pending, note_sent=False."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals(compose=True)],
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_is_choice_dialog",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_choice_add_note",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_add_note,
+            patch.object(
+                extractor,
+                "_click_choice_send_without_note",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send_without,
+        ):
+            result = await extractor.connect_with_person("testuser", note="Hi there")
+
+        assert result["status"] == "pending"
+        assert result["note_sent"] is False
+        # Tried the note route first, then fell back to send-without-note.
+        mock_add_note.assert_awaited_once()
+        mock_send_without.assert_awaited_once()
+
+    async def test_choice_dialog_neither_button_returns_unavailable(self, mock_page):
+        """Neither the compose dialog nor a usable confirm-dialog button is
+        present after Connect → connect_unavailable."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(invite=True),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_is_choice_dialog",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(extractor, "_click_choice_add_note", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_click_choice_send_without_note",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+
     async def test_returns_pending(self, mock_page):
         """Profile with a pending invitation: detected via labeled <a> in
         the action root. Returns status='pending' without firing the
@@ -1678,6 +1855,36 @@ class TestConnectWithPerson:
         mock_page.locator = MagicMock(return_value=menu)
 
         assert await extractor._click_more_menu_connect() is False
+
+    async def test_is_choice_dialog_true_when_labels_present(self, mock_page):
+        """A dialog whose heading/buttons match CHOICE_DIALOG_LABELS is
+        recognized as the confirm dialog."""
+        extractor = LinkedInExtractor(mock_page)
+
+        matched = MagicMock()
+        matched.count = AsyncMock(return_value=1)
+        sub = MagicMock()
+        sub.filter = MagicMock(return_value=matched)
+
+        dialog = MagicMock()
+        dialog.locator = MagicMock(return_value=sub)
+
+        collection = MagicMock()
+        collection.count = AsyncMock(return_value=1)
+        collection.first = dialog
+        mock_page.locator = MagicMock(return_value=collection)
+
+        assert await extractor._is_choice_dialog() is True
+
+    async def test_is_choice_dialog_false_when_no_dialog(self, mock_page):
+        """No open dialog → not the confirm dialog."""
+        extractor = LinkedInExtractor(mock_page)
+
+        collection = MagicMock()
+        collection.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=collection)
+
+        assert await extractor._is_choice_dialog() is False
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
