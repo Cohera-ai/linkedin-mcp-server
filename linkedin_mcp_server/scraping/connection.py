@@ -88,16 +88,6 @@ CHOICE_DIALOG_LABELS: dict[str, tuple[str, str, str]] = {
 }
 
 
-# Locale-gated label for the "Cancel adding a note" button shown in the
-# compose view of the invite confirm dialog. Clicking it returns to the
-# two-button choice dialog, restoring the "Send without a note" option —
-# the recovery path used when the note-compose submit cannot complete.
-# Same AGENTS.md text escape-hatch rationale as the tables above.
-CHOICE_DIALOG_CANCEL_LABELS: dict[str, str] = {
-    "en": "Cancel adding a note",
-}
-
-
 # Bound the text scan to the top-card region. The previous implementation
 # cut at the first occurrence of "About"/"Experience"/"Education" — but
 # those sentinel words are themselves locale-dependent, so a fixed
